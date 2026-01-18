@@ -1,0 +1,23 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      dotnet: 8.0
+
+  build:
+    commands:
+      - echo "Restoring dependencies..."
+      - dotnet restore
+
+      - echo "Running unit tests..."
+      - dotnet test SessionApi.Tests/SessionApi.Tests.csproj --configuration Release
+
+      - echo "Publishing application..."
+      - dotnet publish SessionApi/SessionApi.csproj -c Release -o publish
+
+artifacts:
+  files:
+    - publish/**/*
+    - appspec.yml
+    - scripts/**/*

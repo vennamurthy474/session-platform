@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step 2 - .NET Core Session API on Free Tier EC2'
+
+# VPC & Basic Networking
+Resources:
+  SessionVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: SessionVPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SessionVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: PublicSubnet
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: SessionIGW
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SessionVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SessionVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+# Security Group for EC2
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP/SSH/API
+      VpcId: !Ref SessionVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+
+# IAM Role for EC2 (CloudWatch Logs)
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+# EC2 Instance with UserData (Installs .NET + Nginx + Your API)
+  SessionAPIInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      KeyName: free-tier-key  # Create this in Console first
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref PublicSubnet
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          curl -sSL https://dot.net/v1/dotnet-install.sh | bash /dev/stdin --channel 8.0
+          export PATH=$PATH:/root/.dotnet
+          
+          # Create API directory
+          mkdir -p /var/www/session-api
+          
+          # Copy your published API (we'll upload this next step)
+          # For now, create simple test API
+          cd /var/www/session-api
+          dotnet new webapi -n TestAPI
+          cd TestAPI
+          dotnet add package Microsoft.AspNetCore.OpenApi
+          
+          # Add session endpoint
+          cat > Program.cs << 'EOF'
+          var builder = WebApplication.CreateBuilder(args);
+          builder.Services.AddControllers();
+          var app = builder.Build();
+          app.UseRouting();
+          app.MapControllers();
+          app.MapGet("/health", () => "EC2 Session API Healthy");
+          app.MapGet("/session/{id}", (string id) => 
+            Results.Ok(new { id, status = "active", timestamp = DateTime.UtcNow }));
+          app.Run();
+          EOF
+          
+          dotnet publish -c Release -o /var/www/session-api/publish
+          
+          # Install Nginx
+          yum install nginx -y
+          systemctl enable nginx
+          
+          # Nginx config for API
+          cat > /etc/nginx/conf.d/session-api.conf << 'EOF'
+          server {
+              listen 80;
+              location / {
+                  proxy_pass http://localhost:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+          EOF
+          
+          systemctl start nginx
+          
+          # Run API as background service
+          nohup /root/.dotnet/dotnet /var/www/session-api/publish/TestAPI.dll &
+          
+          # Install CloudWatch agent
+          yum install amazon-cloudwatch-agent -y
+
+Outputs:
+  APIEndpoint:
+    Description: Session API URL
+    Value: !Sub 'http://${SessionAPIInstance.PublicIp}/health'
+  PublicIP:
+    Value: !Ref SessionAPIInstance.PublicIp
