@@ -1,13 +1,14 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: EC2 Linux instance for Session Platform with CodeDeploy Agent
+Description: EC2 for Session Platform with CodeDeploy Agent
 
 Parameters:
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: Existing EC2 KeyPair for SSH access
+    Description: EC2 KeyPair for SSH access
 
 Resources:
 
+  # 1️⃣ IAM ROLE FOR EC2
   SessionEC2Role:
     Type: AWS::IAM::Role
     Properties:
@@ -19,8 +20,7 @@ Resources:
               Service: ec2.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonEC2RoleforAWSCodeDeploy
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
 
   SessionInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -28,6 +28,7 @@ Resources:
       Roles:
         - !Ref SessionEC2Role
 
+  # 2️⃣ SECURITY GROUP (THIS WAS MISSING)
   SessionSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -42,11 +43,12 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
 
+  # 3️⃣ EC2 INSTANCE
   SessionEC2:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: t3.micro
-      ImageId: ami-0c02fb55956c7d316   # Amazon Linux 2 (us-east-1)
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
       KeyName: !Ref KeyName
       IamInstanceProfile: !Ref SessionInstanceProfile
       SecurityGroupIds:
@@ -58,8 +60,7 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           yum update -y
-          yum install -y ruby wget
-          yum install -y dotnet-sdk-8.0
+          yum install -y ruby wget dotnet-sdk-8.0
 
           cd /home/ec2-user
           wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
